@@ -2,35 +2,156 @@
 - name: Install Clickhouse
   hosts: clickhouse
   handlers:
-    - name: Start clickhouse service
+    - name: Restart clickhouse service
       become: true
-      ansible.builtin.service:
-        name: clickhouse-server
-        state: restarted
+      ansible.builtin.shell:
+        cmd: |
+          pkill -x clickhouse-serv || true
+          sleep 2
+          su -s /bin/bash clickhouse -c "nohup clickhouse-server --config-file /etc/clickhouse-server/config.xml --daemon"
+      changed_when: false
+
   tasks:
-    - block:
+    - name: Get clickhouse distrib block
+      block:
         - name: Get clickhouse distrib
           ansible.builtin.get_url:
             url: "https://packages.clickhouse.com/rpm/stable/{{ item }}-{{ clickhouse_version }}.noarch.rpm"
             dest: "./{{ item }}-{{ clickhouse_version }}.rpm"
+            mode: '0644'
+            timeout: 120
           with_items: "{{ clickhouse_packages }}"
       rescue:
         - name: Get clickhouse distrib
           ansible.builtin.get_url:
             url: "https://packages.clickhouse.com/rpm/stable/clickhouse-common-static-{{ clickhouse_version }}.x86_64.rpm"
             dest: "./clickhouse-common-static-{{ clickhouse_version }}.rpm"
+            mode: '0644'
+            timeout: 120
+
     - name: Install clickhouse packages
       become: true
-      ansible.builtin.yum:
+      ansible.builtin.dnf:
         name:
           - clickhouse-common-static-{{ clickhouse_version }}.rpm
           - clickhouse-client-{{ clickhouse_version }}.rpm
           - clickhouse-server-{{ clickhouse_version }}.rpm
-      notify: Start clickhouse service
-    - name: Flush handlers
-      meta: flush_handlers
+        disable_gpg_check: true
+      notify: Restart clickhouse service
+
+    - name: Install procps-ng and iproute
+      become: true
+      ansible.builtin.dnf:
+        name:
+          - procps-ng
+          - iproute
+        state: present
+
+    - name: Create clickhouse runtime directories
+      become: true
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: clickhouse
+        group: clickhouse
+        mode: '0755'
+        recurse: true
+      loop:
+        - /var/lib/clickhouse
+        - /var/log/clickhouse-server
+        - /var/run/clickhouse-server
+      changed_when: false
+
+    - name: Ensure clickhouse is running
+      become: true
+      ansible.builtin.shell:
+        cmd: |
+          set -o pipefail
+          if ! ss -tlnp | grep -q ':9000 '; then
+            su -s /bin/bash clickhouse -c "clickhouse-server --config-file /etc/clickhouse-server/config.xml --daemon"
+            sleep 5
+            echo "started"
+          else
+            echo "already running"
+          fi
+        executable: /bin/bash
+      register: ch_status
+      changed_when: "'started' in ch_status.stdout"
+
+    - name: Wait for clickhouse to start
+      ansible.builtin.wait_for:
+        port: 9000
+        delay: 3
+        timeout: 30
+
     - name: Create database
       ansible.builtin.command: "clickhouse-client -q 'create database logs;'"
       register: create_db
-      failed_when: create_db.rc != 0 and create_db.rc !=82
+      failed_when: create_db.rc != 0 and create_db.rc != 82
       changed_when: create_db.rc == 0
+
+- name: Install and configure Vector
+  hosts: vector
+  become: true
+  handlers:
+    - name: Restart vector service
+      ansible.builtin.shell:
+        cmd: |
+          pkill -x vector || true
+          sleep 2
+          nohup {{ vector_install_dir }}/bin/vector --config /etc/vector/vector.toml > /var/log/vector.log 2>&1 &
+      changed_when: false
+
+  tasks:
+    - name: Install ca-certificates and tar
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - tar
+          - gzip
+        state: present
+        update_cache: true
+
+    - name: Get vector distrib
+      ansible.builtin.get_url:
+        url: "https://packages.timber.io/vector/{{ vector_version }}/vector-{{ vector_version }}-x86_64-unknown-linux-gnu.tar.gz"
+        dest: "/tmp/vector-{{ vector_version }}.tar.gz"
+        mode: '0644'
+        timeout: 120
+
+    - name: Unarchive vector
+      ansible.builtin.unarchive:
+        src: "/tmp/vector-{{ vector_version }}.tar.gz"
+        dest: /opt/
+        remote_src: true
+        creates: "/opt/vector/bin/vector"
+
+    - name: Rename vector directory
+      ansible.builtin.command:
+        cmd: "mv /opt/vector-x86_64-unknown-linux-gnu /opt/vector"
+        creates: /opt/vector
+
+    - name: Create vector config dir
+      ansible.builtin.file:
+        path: /etc/vector
+        state: directory
+        mode: '0755'
+
+    - name: Deploy vector config
+      ansible.builtin.template:
+        src: vector.toml.j2
+        dest: /etc/vector/vector.toml
+        mode: '0644'
+      notify: Restart vector service
+
+    - name: Ensure vector is running
+      ansible.builtin.shell:
+        cmd: |
+          if ! pgrep -x vector > /dev/null; then
+            nohup {{ vector_install_dir }}/bin/vector --config /etc/vector/vector.toml > /var/log/vector.log 2>&1 &
+            echo "started"
+          else
+            echo "already running"
+          fi
+      register: vec_status
+      changed_when: "'started' in vec_status.stdout"

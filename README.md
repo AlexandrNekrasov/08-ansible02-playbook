@@ -1,29 +1,78 @@
-# Домашнее задание к занятию 2 «Работа с Playbook»
+# Домашнее задание к занятию «Работа с Playbook» - Некрасов Александр
 
-## Подготовка к выполнению
+## Что делает playbook
 
-1. * Необязательно. Изучите, что такое [ClickHouse](https://www.youtube.com/watch?v=fjTNS2zkeBs) и [Vector](https://www.youtube.com/watch?v=CgEhyffisLY).
-2. Создайте свой публичный репозиторий на GitHub с произвольным именем или используйте старый.
-3. Скачайте [Playbook](./playbook/) из репозитория с домашним заданием и перенесите его в свой репозиторий.
-4. Подготовьте хосты в соответствии с группами из предподготовленного playbook.
+Playbook `site.yml` устанавливает и настраивает два сервиса:
 
-## Основная часть
+1. **ClickHouse** — колоночная СУБД для аналитики:
+   - Скачивает RPM-пакеты с официального репозитория
+   - Устанавливает `clickhouse-server`, `clickhouse-client`, `clickhouse-common-static`
+   - Настраивает runtime-директории с правильным владельцем
+   - Запускает сервер под пользователем `clickhouse`
+   - Создаёт базу данных `logs`
 
-1. Подготовьте свой inventory-файл `prod.yml`.
-2. Допишите playbook: нужно сделать ещё один play, который устанавливает и настраивает [vector](https://vector.dev). Конфигурация vector должна деплоиться через template файл jinja2. От вас не требуется использовать все возможности шаблонизатора, просто вставьте стандартный конфиг в template файл. Информация по шаблонам по [ссылке](https://www.dmosk.ru/instruktions.php?object=ansible-nginx-install). не забудьте сделать handler на перезапуск vector в случае изменения конфигурации!
-3. При создании tasks рекомендую использовать модули: `get_url`, `template`, `unarchive`, `file`.
-4. Tasks должны: скачать дистрибутив нужной версии, выполнить распаковку в выбранную директорию, установить vector.
-5. Запустите `ansible-lint site.yml` и исправьте ошибки, если они есть.
-6. Попробуйте запустить playbook на этом окружении с флагом `--check`.
-7. Запустите playbook на `prod.yml` окружении с флагом `--diff`. Убедитесь, что изменения на системе произведены.
-8. Повторно запустите playbook с флагом `--diff` и убедитесь, что playbook идемпотентен.
-9. Подготовьте README.md-файл по своему playbook. В нём должно быть описано: что делает playbook, какие у него есть параметры и теги. Пример качественной документации ansible playbook по [ссылке](https://github.com/opensearch-project/ansible-playbook). Так же приложите скриншоты выполнения заданий №5-8
-10. Готовый playbook выложите в свой репозиторий, поставьте тег `08-ansible-02-playbook` на фиксирующий коммит, в ответ предоставьте ссылку на него.
+2. **Vector** — сборщик и трансформер логов:
+   - Скачивает дистрибутив
+   - Распаковывает в `/opt/vector`
+   - Деплоит конфиг `/etc/vector/vector.toml` через Jinja2-шаблон
+   - Запускает Vector
+   - Перезапускает при изменении конфига (handler)
 
+## Параметры (переменные)
+
+### group_vars/clickhouse/vars.yml
+
+| Переменная | Описание | Значение по умолчанию |
+|------------|----------|----------------------|
+| `clickhouse_version` | Версия ClickHouse | `22.3.3.44` |
+| `clickhouse_packages` | Список пакетов для скачивания | `[clickhouse-client, clickhouse-server, clickhouse-common-static]` |
+
+### group_vars/vector/vars.yml
+
+| Переменная | Описание | Значение по умолчанию |
+|------------|----------|----------------------|
+| `vector_version` | Версия Vector | `0.21.1` |
+| `vector_install_dir` | Директория установки | `/opt/vector` |
+
+## Теги
+
+Playbook использует **два play** (без явных тегов):
+- `Install Clickhouse` — для группы `clickhouse`
+- `Install and configure Vector` — для группы `vector`
+
+## Inventory
+
+### inventory/prod.yml
+
+```yaml
 ---
+clickhouse:
+  hosts:
+    clickhouse-01:
+      ansible_connection: docker
+      ansible_host: centos7
+vector:
+  hosts:
+    vector-01:
+      ansible_connection: docker
+      ansible_host: ubuntu
 
-### Как оформить решение задания
+```
+Обычный запуск
+ansible-playbook -i inventory/prod.yml site.yml
 
-Приложите ссылку на ваше решение в поле "Ссылка на решение" и нажмите "Отправить решение"
+Проверка синтаксиса
 
----
+```ansible-playbook -i inventory/prod.yml site.yml --syntax-check```
+
+Проверка (dry-run)
+
+```ansible-playbook -i inventory/prod.yml site.yml --check```
+
+С показом diff
+
+```ansible-playbook -i inventory/prod.yml site.yml --diff```
+
+Линтинг
+
+```ansible-lint site.yml```
